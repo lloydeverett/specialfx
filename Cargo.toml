@@ -1,0 +1,43 @@
+[package]
+name = "specialfx"
+version = "0.1.0"
+edition = "2021"
+description = "Translucent fullscreen colour overlays (night mode, dimming, tints)"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["cli"]
+# Dependencies needed only by the `specialfx` binary.
+cli = ["dep:clap", "dep:ctrlc"]
+
+[[bin]]
+name = "specialfx"
+required-features = ["cli"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"], optional = true }
+ctrlc = { version = "3.5", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDate", "NSGeometry", "NSRunLoop", "NSString"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSColor",
+    "NSEvent",
+    "NSGraphics",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSWindow",
+] }
