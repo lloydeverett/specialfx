@@ -76,6 +76,10 @@ impl Drop for Overlay {
     }
 }
 
+pub fn set_background_app(_background: bool) -> Result<()> {
+    Ok(())
+}
+
 pub fn run_until(mut should_stop: impl FnMut() -> bool, interval: Duration) {
     // The overlay thread pumps its own messages; nothing to do here.
     while !should_stop() {

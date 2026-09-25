@@ -51,6 +51,11 @@ fn main() -> ExitCode {
     .clamped();
     let fade = Duration::from_secs_f32(args.fade.max(0.0));
 
+    // No Dock icon, menu bar or Cmd-Tab entry on macOS.
+    if let Err(e) = specialfx::set_background_app(true) {
+        eprintln!("specialfx: couldn't run as a background app: {e}");
+    }
+
     let mut overlay = match Overlay::new(OverlayOptions {
         color: if fade.is_zero() { target } else { target.with_alpha(0.0) },
         exclude_from_capture: !args.allow_capture,
@@ -88,3 +93,4 @@ fn main() -> ExitCode {
 
     ExitCode::SUCCESS
 }
+

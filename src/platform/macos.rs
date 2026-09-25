@@ -4,6 +4,9 @@
 //! AppKit is main-thread only, so everything here requires a
 //! [`MainThreadMarker`]. Windows render only while the main thread pumps
 //! events, via [`run_until`] or an existing `NSApplication` run loop.
+//!
+//! Process-wide state such as the activation policy (Dock icon, menu bar) is
+//! changed only when the caller asks, via [`set_background_app`].
 
 use std::time::Duration;
 
@@ -29,10 +32,8 @@ impl Overlay {
     pub fn new(options: &OverlayOptions) -> Result<Self> {
         let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
 
-        let app = NSApplication::sharedApplication(mtm);
-        // No Dock icon or menu bar for the overlay process.
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-
+        // Deliberately leaves the activation policy alone: whether the process
+        // is a background app is the host app's decision, not the overlay's.
         let background = ns_color(options.color);
         let windows = NSScreen::screens(mtm)
             .iter()
@@ -90,6 +91,21 @@ impl Drop for Overlay {
             window.orderOut(None);
             window.close();
         }
+    }
+}
+
+pub fn set_background_app(background: bool) -> Result<()> {
+    let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
+    let policy = if background {
+        // No Dock icon, menu bar or Cmd-Tab entry, but windows still show.
+        NSApplicationActivationPolicy::Accessory
+    } else {
+        NSApplicationActivationPolicy::Regular
+    };
+    if NSApplication::sharedApplication(mtm).setActivationPolicy(policy) {
+        Ok(())
+    } else {
+        Err(Error::Os("couldn't change the activation policy".into()))
     }
 }
 

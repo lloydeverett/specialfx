@@ -17,6 +17,10 @@ impl Overlay {
     }
 }
 
+pub fn set_background_app(_background: bool) -> Result<()> {
+    Ok(())
+}
+
 pub fn run_until(mut should_stop: impl FnMut() -> bool, interval: Duration) {
     while !should_stop() {
         std::thread::sleep(interval);

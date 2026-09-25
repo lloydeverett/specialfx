@@ -33,6 +33,12 @@ overlay.set_color(presets::DIM)?;
 specialfx::run_until(|| false); // macOS: must pump events on the main thread
 ```
 
+The library never changes process-wide state like the macOS activation policy
+unless you ask it to, so whether your app has a Dock icon and menu bar is up to
+you. To run without them (the CLI does this), call
+`specialfx::set_background_app(true)` on the main thread before creating the
+overlay. It does nothing on other platforms.
+
 Build without the CLI's dependencies with `default-features = false`.
 
 ## Known gaps

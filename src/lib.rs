@@ -21,7 +21,9 @@
 //!
 //! - **macOS**: AppKit requires [`Overlay::new`] and [`run_until`] to be called
 //!   on the main thread. If your app already runs an `NSApplication` loop you
-//!   don't need [`run_until`].
+//!   don't need [`run_until`]. The overlay never changes the activation
+//!   policy on its own, so whether your app has a Dock icon and menu bar is up
+//!   to you: see [`set_background_app`], or set `LSUIElement` in your `Info.plist`.
 //! - **Windows**: the overlay owns a background thread with its own message
 //!   loop, so it works from any thread and needs no pumping by the caller.
 //!   [`run_until`] just sleeps.
@@ -118,6 +120,19 @@ impl Overlay {
         self.color = color;
         Ok(())
     }
+}
+
+/// Makes this process a background app (`true`) or a regular one (`false`).
+///
+/// On macOS a background app has no Dock icon, menu bar or Cmd-Tab entry, but
+/// its windows, overlays included, still show. This is the `Accessory`
+/// activation policy; `false` restores `Regular`. It applies to the whole
+/// process, so it's the app's call, not the overlay's. A background tool
+/// typically calls `set_background_app(true)` once, before creating an overlay.
+///
+/// Must be called on the main thread on macOS. Does nothing elsewhere.
+pub fn set_background_app(background: bool) -> Result<()> {
+    platform::set_background_app(background)
 }
 
 /// Pumps platform events until `should_stop` returns true. It is polled
