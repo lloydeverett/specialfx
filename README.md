@@ -33,6 +33,11 @@ overlay.set_color(presets::DIM)?;
 specialfx::run_until(|| false); // macOS: must pump events on the main thread
 ```
 
+Create the overlay on the main thread. The `Overlay` handle is `Send + Sync`,
+so after that you can move it to any thread and update it from there. On macOS
+those updates are queued to the main thread, which must be pumping events:
+either your app's own loop or `run_until`.
+
 The library never changes process-wide state like the macOS activation policy
 unless you ask it to, so whether your app has a Dock icon and menu bar is up to
 you. To run without them (the CLI does this), call

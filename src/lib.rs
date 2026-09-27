@@ -19,13 +19,19 @@
 //!
 //! ## Threading
 //!
-//! - **macOS**: AppKit requires [`Overlay::new`] and [`run_until`] to be called
-//!   on the main thread. If your app already runs an `NSApplication` loop you
-//!   don't need [`run_until`]. The overlay never changes the activation
-//!   policy on its own, so whether your app has a Dock icon and menu bar is up
-//!   to you: see [`set_background_app`], or set `LSUIElement` in your `Info.plist`.
+//! [`Overlay`] is `Send + Sync` on every platform: once created, it can be
+//! moved to and updated from any thread.
+//!
+//! - **macOS**: AppKit requires [`Overlay::new`], [`set_background_app`] and
+//!   [`run_until`] to be called on the main thread. Calls to
+//!   [`Overlay::set_color`] from other threads are queued to the main thread,
+//!   which must be pumping events for them to show: either an existing
+//!   `NSApplication` loop, or [`run_until`]. The overlay never changes the
+//!   activation policy on its own, so whether your app has a Dock icon and
+//!   menu bar is up to you: see [`set_background_app`], or set `LSUIElement`
+//!   in your `Info.plist`.
 //! - **Windows**: the overlay owns a background thread with its own message
-//!   loop, so it works from any thread and needs no pumping by the caller.
+//!   loop, so it needs no pumping by the caller.
 //!   [`run_until`] just sleeps.
 
 mod color;
@@ -77,7 +83,7 @@ impl Default for OverlayOptions {
 pub enum Error {
     /// This platform has no overlay backend.
     Unsupported,
-    /// macOS: called off the main thread.
+    /// macOS: [`Overlay::new`] or [`set_background_app`] called off the main thread.
     NotMainThread,
     /// The OS refused to create or update the overlay.
     Os(String),
@@ -98,10 +104,20 @@ impl std::error::Error for Error {}
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A live overlay covering every monitor. Dropping it removes the overlay.
+///
+/// Create it on the main thread; after that it can be used from any thread
+/// (see [Threading](crate#threading)).
 pub struct Overlay {
     inner: platform::Overlay,
     color: Color,
 }
+
+// Every backend must keep the handle thread-safe, so code that builds on one
+// platform builds on the others.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Overlay>();
+};
 
 impl Overlay {
     pub fn new(options: OverlayOptions) -> Result<Self> {
@@ -110,6 +126,8 @@ impl Overlay {
         Ok(Overlay { inner, color })
     }
 
+    /// The colour last passed to [`set_color`](Self::set_color) (or `new`),
+    /// clamped. Updates from other threads may not be on screen yet.
     pub fn color(&self) -> Color {
         self.color
     }
