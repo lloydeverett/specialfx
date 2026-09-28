@@ -22,6 +22,7 @@ the tint and can't mix channels, so no grayscale or inversion.
     cargo run --release -- dim --opacity 0.3
     cargo run --release -- '#0040ff' -o 0.2 --fade 2 --duration 10
     cargo run --release -- red --allow-capture        # show up in screenshots
+    cargo run --release -- dim --hide-others --exempt com.apple.Terminal
 
 ## Library
 
@@ -38,6 +39,34 @@ unless you ask it to, so whether your app has a Dock icon and menu bar is up to
 you. To run without them (the CLI does this), call
 `specialfx::set_background_app(true)` on the main thread before creating the
 overlay. It does nothing on other platforms.
+
+### Hiding other apps
+
+`specialfx::hide_others(&options)` hides every other app's windows and keeps
+them hidden, re-hiding anything that reappears or launches, until
+`specialfx::show_others()` brings back what it hid. Windows belonging to this
+process are never touched. System UI and task managers are exempt by default
+(`specialfx::exemptions`), and you can exempt more apps, named the way the
+current platform names them (bundle IDs on macOS, executable names on Windows):
+
+```rust
+let terminal = if cfg!(windows) { "WindowsTerminal.exe" } else { "com.apple.Terminal" };
+specialfx::hide_others(&specialfx::HideOthersOptions {
+    exempt: vec![terminal.into()],
+    ..Default::default()
+})?;
+```
+
+Both backends use public APIs only:
+
+- **macOS** hides whole apps with `NSRunningApplication.hide()`, as Cmd-H does,
+  re-hiding on workspace launch/activate/unhide notifications and a 0.5 s
+  timer. No permissions needed. Main thread only, and it needs events pumped.
+- **Windows** minimizes top-level windows with `ShowWindowAsync`, re-minimizing
+  on WinEvent hooks and a 0.5 s timer. It can't touch elevated apps unless
+  it's elevated too.
+
+Both are recoverable if the process dies: apps stay in the Dock or taskbar.
 
 Build without the CLI's dependencies with `default-features = false`.
 

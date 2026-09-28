@@ -358,6 +358,7 @@ dependencies = [
 name = "specialfx"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "clap",
  "ctrlc",
  "objc2",
