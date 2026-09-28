@@ -3,7 +3,9 @@
 //! An [`Overlay`] is a set of borderless, always-on-top, click-through windows
 //! (one per monitor) filled with a semi-transparent [`Color`]. The system
 //! compositor blends them over everything else, so every pixel becomes
-//! `src × (1 − α) + colour × α` (see [`Color::blend_over`]).
+//! `src × (1 − α) + colour × α` (see [`Color::blend_over`]). The windows follow
+//! monitors being plugged in, unplugged, resized or rearranged, so the whole
+//! desktop stays covered for as long as the overlay lives.
 //!
 //! ```no_run
 //! use specialfx::{Color, Overlay, OverlayOptions};
