@@ -66,7 +66,8 @@ Both backends use public APIs only:
 
 - **macOS** hides whole apps with `NSRunningApplication.hide()`, as Cmd-H does,
   re-hiding on workspace launch/activate/unhide notifications and a 0.5 s
-  timer. No permissions needed. Main thread only, and it needs events pumped.
+  timer. No permissions needed. Callable from any thread (off the main thread
+  it's queued there, like `set_color`), and it needs events pumped.
 - **Windows** minimizes top-level windows with `ShowWindowAsync`, re-minimizing
   on WinEvent hooks and a 0.5 s timer. It can't touch elevated apps unless
   it's elevated too.

@@ -28,7 +28,8 @@
 //!   [`run_until`] to be called on the main thread. Calls to
 //!   [`Overlay::set_color`] from other threads are queued to the main thread,
 //!   which must be pumping events for them to show: either an existing
-//!   `NSApplication` loop, or [`run_until`]. The overlay never changes the
+//!   `NSApplication` loop, or [`run_until`]. [`hide_others`] and
+//!   [`show_others`] work the same way. The overlay never changes the
 //!   activation policy on its own, so whether your app has a Dock icon and
 //!   menu bar is up to you: see [`set_background_app`], or set `LSUIElement`
 //!   in your `Info.plist`.
@@ -218,8 +219,9 @@ pub mod exemptions {
 /// just updates the exemptions.
 ///
 /// - **macOS**: hides whole apps, as Cmd-H does (they stay in the Dock and
-///   Cmd-Tab). Must be called on the main thread, and only takes effect while
-///   the main thread pumps events.
+///   Cmd-Tab). Callable from any thread: off the main thread it's queued
+///   there. Either way it only takes effect while the main thread pumps
+///   events.
 /// - **Windows**: minimizes top-level windows to the taskbar, from a
 ///   background thread. Windows of elevated processes can't be touched unless
 ///   this process is elevated too.
@@ -232,7 +234,8 @@ pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
 
 /// Stops [`hide_others`] and brings back the windows it hid. Windows the user
 /// had hidden or minimized themselves stay that way. Does nothing if
-/// [`hide_others`] isn't active. Main thread only on macOS.
+/// [`hide_others`] isn't active. On macOS, off the main thread it's queued
+/// there, like [`hide_others`].
 pub fn show_others() -> Result<()> {
     platform::show_others()
 }

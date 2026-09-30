@@ -13,7 +13,9 @@
 //! changed only when the caller asks, via [`set_background_app`].
 //!
 //! [`hide_others`] uses `-[NSRunningApplication hide]`, the public equivalent
-//! of Cmd-H, and re-hides apps on workspace notifications and a timer.
+//! of Cmd-H, and re-hides apps on workspace notifications and a timer. Like
+//! `set_color`, it and [`show_others`] hand their work to the main dispatch
+//! queue when called off the main thread.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -322,9 +324,52 @@ thread_local! {
     static HIDER: RefCell<Option<Hider>> = const { RefCell::new(None) };
 }
 
+/// The latest `hide_others` options, or `None` after `show_others`. Like the
+/// overlay's colour, work queued from other threads reads this when it runs,
+/// so the last call wins whichever thread made it.
+static WANTED_HIDING: Mutex<Option<HideOthersOptions>> = Mutex::new(None);
+/// An `apply_wanted_hiding` is queued on the main thread and hasn't read
+/// `WANTED_HIDING` yet.
+static HIDING_QUEUED: AtomicBool = AtomicBool::new(false);
+
 pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
-    MainThreadMarker::new().ok_or(Error::NotMainThread)?;
-    let exempt = options.exempt.clone();
+    *WANTED_HIDING.lock().unwrap() = Some(options.clone());
+    request_hiding_update();
+    Ok(())
+}
+
+pub fn show_others() -> Result<()> {
+    *WANTED_HIDING.lock().unwrap() = None;
+    request_hiding_update();
+    Ok(())
+}
+
+/// Applies `WANTED_HIDING`: now on the main thread, or else via the main
+/// queue, with at most one queued at a time (see `request_repaint`).
+fn request_hiding_update() {
+    if let Some(mtm) = MainThreadMarker::new() {
+        apply_wanted_hiding(mtm);
+    } else if !HIDING_QUEUED.swap(true, Ordering::AcqRel) {
+        DispatchQueue::main().exec_async(|| {
+            // The main queue only ever runs on the main thread.
+            let mtm = MainThreadMarker::new().unwrap();
+            HIDING_QUEUED.swap(false, Ordering::AcqRel);
+            apply_wanted_hiding(mtm);
+        });
+    }
+}
+
+fn apply_wanted_hiding(mtm: MainThreadMarker) {
+    // Cloned so the lock isn't held while AppKit runs.
+    let wanted = WANTED_HIDING.lock().unwrap().clone();
+    match wanted {
+        Some(options) => hide_others_now(options, mtm),
+        None => show_others_now(mtm),
+    }
+}
+
+fn hide_others_now(options: HideOthersOptions, _mtm: MainThreadMarker) {
+    let exempt = options.exempt;
     let updated = HIDER.with(|h| match h.borrow_mut().as_mut() {
         Some(hider) => {
             hider.exempt = exempt.clone();
@@ -363,13 +408,11 @@ pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
         HIDER.with(|h| *h.borrow_mut() = Some(hider));
     }
     sweep();
-    Ok(())
 }
 
-pub fn show_others() -> Result<()> {
-    MainThreadMarker::new().ok_or(Error::NotMainThread)?;
+fn show_others_now(_mtm: MainThreadMarker) {
     let Some(hider) = HIDER.with(|h| h.borrow_mut().take()) else {
-        return Ok(());
+        return;
     };
     hider.timer.invalidate();
     let center = NSWorkspace::sharedWorkspace().notificationCenter();
@@ -382,7 +425,6 @@ pub fn show_others() -> Result<()> {
             app.unhide();
         }
     }
-    Ok(())
 }
 
 /// Hides every visible app that isn't us or exempt.
