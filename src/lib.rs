@@ -28,7 +28,8 @@
 //!   [`run_until`] to be called on the main thread. Calls to
 //!   [`Overlay::set_color`] from other threads are queued to the main thread,
 //!   which must be pumping events for them to show: either an existing
-//!   `NSApplication` loop, or [`run_until`]. The overlay never changes the
+//!   `NSApplication` loop, or [`run_until`]. [`hide_others`] and
+//!   [`show_others`] work the same way. The overlay never changes the
 //!   activation policy on its own, so whether your app has a Dock icon and
 //!   menu bar is up to you: see [`set_background_app`], or set `LSUIElement`
 //!   in your `Info.plist`.
@@ -83,7 +84,7 @@ impl Default for OverlayOptions {
 
 #[derive(Debug)]
 pub enum Error {
-    /// This platform has no overlay backend.
+    /// This platform has no backend for the feature.
     Unsupported,
     /// macOS: [`Overlay::new`] or [`set_background_app`] called off the main thread.
     NotMainThread,
@@ -94,7 +95,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Unsupported => write!(f, "colour overlays are not supported on this platform"),
+            Error::Unsupported => write!(f, "not supported on this platform"),
             Error::NotMainThread => write!(f, "overlays must be created on the main thread"),
             Error::Os(msg) => write!(f, "{msg}"),
         }
@@ -153,6 +154,94 @@ impl Overlay {
 /// Must be called on the main thread on macOS. Does nothing elsewhere.
 pub fn set_background_app(background: bool) -> Result<()> {
     platform::set_background_app(background)
+}
+
+/// Which apps [`hide_others`] leaves alone. This process's own windows are
+/// never hidden, whether or not they belong to an [`Overlay`].
+#[derive(Debug, Clone)]
+pub struct HideOthersOptions {
+    /// Leave system UI and task managers alone (see [`exemptions`]). You
+    /// almost certainly want this.
+    pub builtin_exemptions: bool,
+    /// More apps to leave alone, case-insensitive. What counts as an app
+    /// depends on the platform:
+    ///
+    /// - **macOS**: a bundle identifier (`com.apple.Terminal`), or the
+    ///   executable name for apps without one.
+    /// - **Windows**: an executable file name (`WindowsTerminal.exe`).
+    pub exempt: Vec<String>,
+}
+
+impl Default for HideOthersOptions {
+    fn default() -> Self {
+        HideOthersOptions { builtin_exemptions: true, exempt: Vec::new() }
+    }
+}
+
+/// Apps that [`hide_others`] leaves alone when
+/// [`HideOthersOptions::builtin_exemptions`] is set.
+pub mod exemptions {
+    /// Bundle identifiers. On top of these, any `com.apple.*` app that isn't a
+    /// regular Dock app (menu bar extras, system agents) is exempt.
+    pub const MACOS: &[&str] = &[
+        "com.apple.dock",
+        "com.apple.loginwindow",
+        "com.apple.SecurityAgent",
+        "com.apple.coreservices.uiagent",
+        "com.apple.UserNotificationCenter",
+        "com.apple.screencaptureui",
+        "com.apple.ActivityMonitor",
+    ];
+
+    /// Executable names. Shell windows (taskbar, desktop, task view) are also
+    /// exempt by window class, since `explorer.exe` owns them as well as
+    /// ordinary File Explorer windows.
+    pub const WINDOWS: &[&str] = &[
+        "ShellExperienceHost.exe",
+        "StartMenuExperienceHost.exe",
+        "ShellHost.exe",
+        "SearchHost.exe",
+        "SearchApp.exe",
+        "SearchUI.exe",
+        "TextInputHost.exe",
+        "LockApp.exe",
+        "LogonUI.exe",
+        "consent.exe",
+        "CredentialUIBroker.exe",
+        "ScreenClippingHost.exe",
+        "SnippingTool.exe",
+        "Taskmgr.exe",
+    ];
+}
+
+/// Hides every other app's windows and keeps them hidden, re-hiding any that
+/// reappear or launch, until [`show_others`]. Calling it again while active
+/// just updates the exemptions.
+///
+/// - **macOS**: hides whole apps, as Cmd-H does (they stay in the Dock and
+///   Cmd-Tab). Callable from any thread. Off the main thread it returns
+///   before anything is hidden, and the main thread picks it up later. Either
+///   way it only takes effect while the main thread pumps events. Whichever
+///   of this and [`show_others`] was called last wins, so calling this then
+///   [`show_others`] from another thread before the main thread gets to them
+///   does nothing.
+/// - **Windows**: minimizes top-level windows to the taskbar, from a
+///   background thread. Windows of elevated processes can't be touched unless
+///   this process is elevated too.
+///
+/// If the process dies without calling [`show_others`], the other windows
+/// just stay hidden or minimized, which the user can undo as usual.
+pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
+    platform::hide_others(options)
+}
+
+/// Stops [`hide_others`] and brings back the windows it hid. Windows the user
+/// had hidden or minimized themselves stay that way. Does nothing if
+/// [`hide_others`] isn't active. On macOS, off the main thread it returns
+/// before anything is shown again, and the last of the two calls wins, as
+/// with [`hide_others`].
+pub fn show_others() -> Result<()> {
+    platform::show_others()
 }
 
 /// Pumps platform events until `should_stop` returns true. It is polled

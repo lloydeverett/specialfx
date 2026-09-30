@@ -4,22 +4,30 @@
 //! [`Overlay`] handle talks to it with thread messages. The window content is
 //! a solid opaque colour and the layered-window constant alpha does the
 //! blending, which gives exactly `src × (1 − α) + colour × α`.
+//!
+//! [`hide_others`] runs on a second thread that minimizes other processes'
+//! top-level windows, using WinEvent hooks to catch them reappearing.
 
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::{Color, Error, OverlayOptions, Result};
+use crate::{exemptions, Color, Error, HideOthersOptions, OverlayOptions, Result};
 
 /// wParam = packed RGBA (see [`pack`]).
 const MSG_SET_COLOR: u32 = WM_APP + 1;
@@ -60,10 +68,7 @@ impl Overlay {
     }
 
     fn post(&self, msg: u32, wparam: WPARAM) -> Result<()> {
-        if unsafe { PostThreadMessageW(self.thread_id, msg, wparam, 0) } == 0 {
-            return Err(last_error("PostThreadMessageW"));
-        }
-        Ok(())
+        post_to(self.thread_id, msg, wparam)
     }
 }
 
@@ -301,6 +306,252 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
+// ---- hiding other apps' windows -----------------------------------------------
+
+/// Re-check everything the hooks aren't told about.
+const HIDE_SWEEP_INTERVAL_MS: u32 = 500;
+/// The exemptions changed; sweep with the new ones.
+const MSG_SWEEP: u32 = WM_APP + 3;
+
+/// Shell windows owned by `explorer.exe`, which also owns ordinary File Explorer windows.
+const SHELL_CLASSES: &[&str] = &[
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "Progman",
+    "WorkerW",
+    "NotifyIconOverflowWindow",
+    "TopLevelWindowForOverflowXamlIsland",
+    "XamlExplorerHostIslandWindow",
+    "MultitaskingViewFrame",
+    "ForegroundStaging",
+    "Windows.UI.Core.CoreWindow",
+];
+
+struct HiderHandle {
+    thread_id: u32,
+    thread: JoinHandle<()>,
+    /// Lowercase executable names to leave alone.
+    exempt: Arc<Mutex<Vec<String>>>,
+}
+
+static HIDER: Mutex<Option<HiderHandle>> = Mutex::new(None);
+
+pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
+    let mut exempt: Vec<String> = options.exempt.iter().map(|s| s.to_lowercase()).collect();
+    if options.builtin_exemptions {
+        exempt.extend(exemptions::WINDOWS.iter().map(|s| s.to_lowercase()));
+    }
+
+    let mut hider = HIDER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(handle) = hider.as_ref() {
+        *handle.exempt.lock().unwrap_or_else(|e| e.into_inner()) = exempt;
+        post_to(handle.thread_id, MSG_SWEEP, 0)?;
+        return Ok(());
+    }
+
+    let exempt = Arc::new(Mutex::new(exempt));
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let thread = {
+        let exempt = exempt.clone();
+        std::thread::Builder::new()
+            .name("specialfx-hider".into())
+            .spawn(move || hider_thread(exempt, ready_tx))
+            .map_err(|e| Error::Os(format!("failed to spawn hider thread: {e}")))?
+    };
+    match ready_rx.recv() {
+        Ok(Ok(thread_id)) => {
+            *hider = Some(HiderHandle { thread_id, thread, exempt });
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            let _ = thread.join();
+            Err(e)
+        }
+        Err(_) => Err(Error::Os("hider thread exited during startup".into())),
+    }
+}
+
+pub fn show_others() -> Result<()> {
+    let Some(handle) = HIDER.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return Ok(());
+    };
+    // The thread restores what it minimized on its way out.
+    let posted = post_to(handle.thread_id, WM_QUIT, 0);
+    let _ = handle.thread.join();
+    posted
+}
+
+struct HiderState {
+    exempt: Arc<Mutex<Vec<String>>>,
+    own_pid: u32,
+    /// Windows we minimized, in order, so `show_others` restores only those.
+    minimized: RefCell<Vec<HWND>>,
+}
+
+thread_local! {
+    static HIDER_STATE: RefCell<Option<HiderState>> = const { RefCell::new(None) };
+}
+
+fn hider_thread(exempt: Arc<Mutex<Vec<String>>>, ready: mpsc::Sender<Result<u32>>) {
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        PeekMessageW(&mut msg, null_mut(), WM_USER, WM_USER, PM_NOREMOVE);
+
+        HIDER_STATE.with(|s| {
+            *s.borrow_mut() = Some(HiderState {
+                exempt,
+                own_pid: GetCurrentProcessId(),
+                minimized: RefCell::new(Vec::new()),
+            })
+        });
+
+        // Out-of-context hooks are delivered to this thread's message loop.
+        let hooks: Vec<HWINEVENTHOOK> = [EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_OBJECT_SHOW]
+            .into_iter()
+            .map(|event| {
+                SetWinEventHook(
+                    event,
+                    event,
+                    null_mut(),
+                    Some(on_win_event),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                )
+            })
+            .collect();
+        if hooks.iter().any(|h| h.is_null()) {
+            let err = last_error("SetWinEventHook");
+            hooks.into_iter().filter(|h| !h.is_null()).for_each(|h| {
+                UnhookWinEvent(h);
+            });
+            let _ = ready.send(Err(err));
+            return;
+        }
+
+        SetTimer(null_mut(), 0, HIDE_SWEEP_INTERVAL_MS, None);
+        sweep();
+        let _ = ready.send(Ok(GetCurrentThreadId()));
+
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if msg.hwnd.is_null() && matches!(msg.message, MSG_SWEEP | WM_TIMER) {
+                sweep();
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        for hook in hooks {
+            UnhookWinEvent(hook);
+        }
+        let minimized = HIDER_STATE
+            .with(|s| s.borrow_mut().take())
+            .map(|state| state.minimized.into_inner())
+            .unwrap_or_default();
+        // Reverse order, so the window that was frontmost ends up frontmost.
+        for hwnd in minimized.into_iter().rev() {
+            if IsWindow(hwnd) != 0 && IsIconic(hwnd) != 0 {
+                ShowWindowAsync(hwnd, SW_RESTORE);
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn on_win_event(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if !hwnd.is_null() && id_object == OBJID_WINDOW && id_child == CHILDID_SELF as i32 {
+        maybe_hide(hwnd);
+    }
+}
+
+unsafe fn sweep() {
+    EnumWindows(Some(sweep_one), 0);
+}
+
+unsafe extern "system" fn sweep_one(hwnd: HWND, _: LPARAM) -> BOOL {
+    maybe_hide(hwnd);
+    TRUE
+}
+
+unsafe fn maybe_hide(hwnd: HWND) {
+    HIDER_STATE.with(|s| {
+        let state = s.borrow();
+        let Some(state) = state.as_ref() else { return };
+        if should_hide(state, hwnd) {
+            // Async, so a hung app can't hang us.
+            ShowWindowAsync(hwnd, SW_MINIMIZE);
+            let mut minimized = state.minimized.borrow_mut();
+            minimized.retain(|&w| IsWindow(w) != 0);
+            if !minimized.contains(&hwnd) {
+                minimized.push(hwnd);
+            }
+        }
+    });
+}
+
+/// Whether `hwnd` is a visible, unexempt, top-level app window of another
+/// process: roughly, whatever would show in Alt-Tab.
+unsafe fn should_hide(state: &HiderState, hwnd: HWND) -> bool {
+    if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetAncestor(hwnd, GA_ROOT) != hwnd {
+        return false;
+    }
+    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    if ex_style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) != 0 {
+        return false;
+    }
+    // Owned windows (dialogs, palettes) follow their owner when it minimizes.
+    if !GetWindow(hwnd, GW_OWNER).is_null() && ex_style & WS_EX_APPWINDOW == 0 {
+        return false;
+    }
+    // Cloaked: on another virtual desktop, or a suspended UWP app.
+    let mut cloaked: u32 = 0;
+    if DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut _, 4) == 0
+        && cloaked != 0
+    {
+        return false;
+    }
+
+    let mut pid = 0;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    if pid == 0 || pid == state.own_pid {
+        return false;
+    }
+    let mut class = [0u16; 256];
+    let len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+    let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+    if SHELL_CLASSES.contains(&class.as_str()) {
+        return false;
+    }
+    // If we can't tell what it is, assume it's something we should leave alone.
+    let Some(exe) = exe_name(pid) else { return false };
+    !state.exempt.lock().unwrap_or_else(|e| e.into_inner()).contains(&exe)
+}
+
+/// Lowercase executable file name of `pid`.
+unsafe fn exe_name(pid: u32) -> Option<String> {
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if process.is_null() {
+        return None;
+    }
+    let mut path = [0u16; 1024];
+    let mut len = path.len() as u32;
+    let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut len);
+    CloseHandle(process);
+    if ok == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&path[..len as usize]);
+    path.rsplit('\\').next().map(str::to_lowercase)
+}
+
 // ---- helpers -----------------------------------------------------------------
 
 fn pack(color: Color) -> WPARAM {
@@ -310,6 +561,13 @@ fn pack(color: Color) -> WPARAM {
 fn unpack(wparam: WPARAM) -> Color {
     let [r, g, b, a] = (wparam as u32).to_le_bytes();
     Color::from_rgba8(r, g, b, a)
+}
+
+fn post_to(thread_id: u32, msg: u32, wparam: WPARAM) -> Result<()> {
+    if unsafe { PostThreadMessageW(thread_id, msg, wparam, 0) } == 0 {
+        return Err(last_error("PostThreadMessageW"));
+    }
+    Ok(())
 }
 
 fn last_error(what: &str) -> Error {

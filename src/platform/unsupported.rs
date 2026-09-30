@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::{Color, Error, OverlayOptions, Result};
+use crate::{Color, Error, HideOthersOptions, OverlayOptions, Result};
 
 pub struct Overlay;
 
@@ -25,4 +25,12 @@ pub fn run_until(mut should_stop: impl FnMut() -> bool, interval: Duration) {
     while !should_stop() {
         std::thread::sleep(interval);
     }
+}
+
+pub fn hide_others(_options: &HideOthersOptions) -> Result<()> {
+    Err(Error::Unsupported)
+}
+
+pub fn show_others() -> Result<()> {
+    Ok(())
 }

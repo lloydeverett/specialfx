@@ -3,6 +3,7 @@
 //!     specialfx                        # night preset
 //!     specialfx dim --opacity 0.3
 //!     specialfx '#0040ff' --opacity 0.2 --fade 2 --duration 10
+//!     specialfx dim --hide-others --exempt com.apple.Terminal
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use specialfx::{presets, Color, Overlay, OverlayOptions};
+use specialfx::{presets, Color, HideOthersOptions, Overlay, OverlayOptions};
 
 #[derive(Parser)]
 #[command(version, about = "Tint or dim the whole screen with a translucent colour overlay")]
@@ -34,6 +35,16 @@ struct Args {
     /// Let screenshots and screen recordings see the overlay.
     #[arg(long)]
     allow_capture: bool,
+
+    /// Keep every other app's windows hidden (macOS) or minimized (Windows)
+    /// while running, and bring them back on exit.
+    #[arg(long)]
+    hide_others: bool,
+
+    /// With --hide-others, leave this app alone: a bundle ID or executable name
+    /// on macOS, an executable name on Windows. Repeatable.
+    #[arg(long, value_name = "APP", requires = "hide_others")]
+    exempt: Vec<String>,
 }
 
 fn parse_color(s: &str) -> Result<Color, String> {
@@ -67,6 +78,13 @@ fn main() -> ExitCode {
         }
     };
 
+    if args.hide_others {
+        let options = HideOthersOptions { exempt: args.exempt.clone(), ..Default::default() };
+        if let Err(e) = specialfx::hide_others(&options) {
+            eprintln!("specialfx: couldn't hide other apps: {e}");
+        }
+    }
+
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
@@ -90,6 +108,10 @@ fn main() -> ExitCode {
         }
         stop.load(Ordering::SeqCst) || deadline.is_some_and(|d| Instant::now() >= d)
     });
+
+    if let Err(e) = specialfx::show_others() {
+        eprintln!("specialfx: couldn't restore other apps: {e}");
+    }
 
     ExitCode::SUCCESS
 }
