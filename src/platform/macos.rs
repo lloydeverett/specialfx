@@ -353,6 +353,9 @@ fn request_hiding_update() {
         DispatchQueue::main().exec_async(|| {
             // The main queue only ever runs on the main thread.
             let mtm = MainThreadMarker::new().unwrap();
+            // Clear the flag before reading `WANTED_HIDING`, so a call made
+            // after the read queues another update. (A swap, as in
+            // `request_repaint`.)
             HIDING_QUEUED.swap(false, Ordering::AcqRel);
             apply_wanted_hiding(mtm);
         });
