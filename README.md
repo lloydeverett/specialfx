@@ -79,7 +79,6 @@ Build without the CLI's dependencies with `default-features = false`.
 
 ## Known gaps
 
-- macOS doesn't rebuild windows when screens change (Windows does, on `WM_DISPLAYCHANGE`).
 - Won't cover the Windows secure desktop (UAC, lock screen) or exclusive-fullscreen games,
   and some macOS system UI draws above it.
 - Capture exclusion on macOS needs testing against ScreenCaptureKit.
