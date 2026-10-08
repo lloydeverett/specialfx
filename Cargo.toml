@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 default = ["cli"]
 # Dependencies needed only by the `specialfx` binary.
 cli = ["dep:clap", "dep:ctrlc"]
+# `specialfx::lua::SpecialFx`, a module that exposes the library to Lua scripts run by avarice.
+lua = ["dep:avarice"]
 
 [[bin]]
 name = "specialfx"
@@ -17,6 +19,8 @@ required-features = ["cli"]
 [dependencies]
 clap = { version = "4.6", features = ["derive"], optional = true }
 ctrlc = { version = "3.5", optional = true }
+# Not on crates.io. No default features: only the embedding API, not avarice's CLI or stdlib.
+avarice = { git = "https://github.com/lloydeverett/avarice", rev = "afb1cc7c801eff456864e93f648d4827fddc116a", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

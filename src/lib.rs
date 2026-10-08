@@ -35,6 +35,8 @@
 //!   [`run_until`] just sleeps.
 
 mod color;
+#[cfg(feature = "lua")]
+pub mod lua;
 mod platform;
 
 use std::fmt;

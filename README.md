@@ -77,6 +77,33 @@ Both are recoverable if the process dies: apps stay in the Dock or taskbar.
 
 Build without the CLI's dependencies with `default-features = false`.
 
+### Lua
+
+The `lua` feature adds `specialfx::lua::SpecialFx`, a module for Lua scripts
+run by [avarice](https://github.com/lloydeverett/avarice). Register it with a
+runtime:
+
+```rust
+let rt = avarice::Runtime::builder(avarice::Profile::Sandbox)
+    .module(specialfx::lua::SpecialFx)
+    .build()?;
+```
+
+and scripts can use the whole library:
+
+```lua
+local fx = require("specialfx")
+local overlay = fx.overlay(fx.color.rgba(1, 0.55, 0.1, 0.3))
+overlay:set_color("#00000080")  -- hex strings work anywhere a colour does
+fx.hide_others({ exempt = { "com.apple.Terminal" } })
+```
+
+Colours are `{ r =, g =, b =, a = }` tables, and `fx.color` has the same
+helpers as `Color`. Errors are raised as Lua errors. An overlay lasts until
+`overlay:close()` or until it's garbage collected, so keep a reference to it.
+There's no `run_until`: on macOS, pumping the main thread is up to the program
+embedding the runtime.
+
 ## Known gaps
 
 - Won't cover the Windows secure desktop (UAC, lock screen) or exclusive-fullscreen games,
