@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use specialfx::{presets, Color, HideOthersOptions, Overlay, OverlayOptions};
+use specialfx::{Color, HideOthersOptions, Overlay, OverlayOptions};
 
 #[derive(Parser)]
 #[command(version, about = "Tint or dim the whole screen with a translucent colour overlay")]
@@ -47,10 +47,24 @@ struct Args {
     exempt: Vec<String>,
 }
 
+/// Colours the CLI accepts by name in place of a hex colour.
+const PRESETS: &[(&str, Color)] = &[
+    // Warm orange tint that cuts blue light. Lifts blacks a little.
+    ("night", Color::rgba(1.0, 0.55, 0.1, 0.30)),
+    // Deeper red tint for late at night.
+    ("red", Color::rgba(1.0, 0.1, 0.0, 0.35)),
+    // Plain dimming: black at 50%. The only overlay that doesn't lift blacks.
+    ("dim", Color::rgba(0.0, 0.0, 0.0, 0.50)),
+];
+
 fn parse_color(s: &str) -> Result<Color, String> {
-    presets::by_name(s)
-        .map(Ok)
-        .unwrap_or_else(|| s.parse().map_err(|e| format!("{e}, or one of {:?}", presets::NAMES)))
+    match PRESETS.iter().find(|(name, _)| name.eq_ignore_ascii_case(s)) {
+        Some(&(_, color)) => Ok(color),
+        None => s.parse().map_err(|e| {
+            let names: Vec<_> = PRESETS.iter().map(|(name, _)| *name).collect();
+            format!("{e}, or one of {names:?}")
+        }),
+    }
 }
 
 fn main() -> ExitCode {
@@ -116,3 +130,24 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_color_accepts_names_case_insensitively() {
+        assert_eq!(parse_color("night"), Ok(Color::rgba(1.0, 0.55, 0.1, 0.30)));
+        assert_eq!(parse_color("DIM"), Ok(Color::rgba(0.0, 0.0, 0.0, 0.50)));
+    }
+
+    #[test]
+    fn parse_color_accepts_hex() {
+        assert_eq!(parse_color("#ff0000"), Ok(Color::rgba(1.0, 0.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn parse_color_error_lists_names() {
+        let err = parse_color("nope").unwrap_err();
+        assert!(err.contains(r#"["night", "red", "dim"]"#), "{err}");
+    }
+}

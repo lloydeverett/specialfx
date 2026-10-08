@@ -10,10 +10,7 @@
 //! ```no_run
 //! use specialfx::{Color, Overlay, OverlayOptions};
 //!
-//! let overlay = Overlay::new(OverlayOptions {
-//!     color: Color::rgba(1.0, 0.55, 0.1, 0.3),
-//!     ..Default::default()
-//! })?;
+//! let overlay = Overlay::new(OverlayOptions::new(Color::rgba(1.0, 0.55, 0.1, 0.3)))?;
 //! // On macOS the overlay only renders while events are pumped on the main thread.
 //! specialfx::run_until(|| false);
 //! # Ok::<(), specialfx::Error>(())
@@ -45,29 +42,6 @@ use std::time::Duration;
 
 pub use color::{Color, ParseColorError};
 
-/// Built-in overlay colours.
-pub mod presets {
-    use super::Color;
-
-    /// Warm orange tint that cuts blue light. Lifts blacks a little.
-    pub const NIGHT: Color = Color::rgba(1.0, 0.55, 0.1, 0.30);
-    /// Deeper red tint for late at night.
-    pub const RED: Color = Color::rgba(1.0, 0.1, 0.0, 0.35);
-    /// Plain dimming: black at 50%. The only overlay that doesn't lift blacks.
-    pub const DIM: Color = Color::rgba(0.0, 0.0, 0.0, 0.50);
-
-    pub fn by_name(name: &str) -> Option<Color> {
-        match name.to_ascii_lowercase().as_str() {
-            "night" => Some(NIGHT),
-            "red" => Some(RED),
-            "dim" => Some(DIM),
-            _ => None,
-        }
-    }
-
-    pub const NAMES: &[&str] = &["night", "red", "dim"];
-}
-
 #[derive(Debug, Clone)]
 pub struct OverlayOptions {
     pub color: Color,
@@ -76,9 +50,10 @@ pub struct OverlayOptions {
     pub exclude_from_capture: bool,
 }
 
-impl Default for OverlayOptions {
-    fn default() -> Self {
-        OverlayOptions { color: presets::NIGHT, exclude_from_capture: true }
+impl OverlayOptions {
+    /// Options for an overlay of `color`, hidden from screen capture.
+    pub fn new(color: Color) -> Self {
+        OverlayOptions { color, exclude_from_capture: true }
     }
 }
 
@@ -251,3 +226,16 @@ pub fn run_until(should_stop: impl FnMut() -> bool) {
 }
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(16);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_options_new_excludes_from_capture() {
+        let color = Color::rgba(0.1, 0.2, 0.3, 0.4);
+        let options = OverlayOptions::new(color);
+        assert_eq!(options.color, color);
+        assert!(options.exclude_from_capture);
+    }
+}

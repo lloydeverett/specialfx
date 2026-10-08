@@ -27,10 +27,10 @@ the tint and can't mix channels, so no grayscale or inversion.
 ## Library
 
 ```rust
-use specialfx::{presets, Overlay, OverlayOptions};
+use specialfx::{Color, Overlay, OverlayOptions};
 
-let mut overlay = Overlay::new(OverlayOptions { color: presets::NIGHT, ..Default::default() })?;
-overlay.set_color(presets::DIM)?;
+let mut overlay = Overlay::new(OverlayOptions::new(Color::rgba(1.0, 0.55, 0.1, 0.3)))?;
+overlay.set_color(Color::rgba(0.0, 0.0, 0.0, 0.5))?;
 specialfx::run_until(|| false); // macOS: must pump events on the main thread
 ```
 
