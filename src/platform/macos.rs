@@ -3,11 +3,12 @@
 //! When screens are added, removed or rearranged, the windows are moved,
 //! created or closed to match.
 //!
-//! AppKit is main-thread only. [`Overlay::new`] must be called there, but the
-//! handle it returns is `Send + Sync`: off the main thread, `set_color` and
-//! drop hand their work to the main dispatch queue. Windows render (and
-//! queued work and screen changes are handled) only while the main thread
-//! pumps events, via [`run_until`] or an existing `NSApplication` run loop.
+//! AppKit is main-thread only, but everything here can be called from any
+//! thread: off the main thread, [`Overlay::new`], `set_color`, drop and
+//! [`set_background_app`] hand their work to the main dispatch queue. Windows
+//! render (and queued work and screen changes are handled) only while the
+//! main thread pumps events, via [`run_until`] or an existing `NSApplication`
+//! run loop.
 //!
 //! Process-wide state such as the activation policy (Dock icon, menu bar) is
 //! changed only when the caller asks, via [`set_background_app`].
@@ -22,7 +23,7 @@ use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use block2::RcBlock;
@@ -55,7 +56,9 @@ pub struct Overlay {
 /// The windows, and the colour they should show. Every reference to this is
 /// released on the main thread, which is where the windows must be freed.
 struct OverlayWindows {
-    state: MainThreadBound<RefCell<WindowState>>,
+    /// Set up on the main thread the first time it's needed, since the
+    /// overlay may be created elsewhere. Use [`Self::state`].
+    state: OnceLock<MainThreadBound<RefCell<WindowState>>>,
     exclude_from_capture: bool,
     /// The latest colour asked for. A repaint reads this when it runs rather
     /// than carrying a colour, so a queued repaint can't show a stale one.
@@ -65,6 +68,7 @@ struct OverlayWindows {
 }
 
 /// The windows themselves, and what keeps them in step with the screens.
+#[derive(Default)]
 struct WindowState {
     /// One per screen, in `NSScreen::screens` order.
     windows: Vec<Retained<NSWindow>>,
@@ -74,6 +78,11 @@ struct WindowState {
 }
 
 impl OverlayWindows {
+    /// The window state, set up on first use.
+    fn state(&self, mtm: MainThreadMarker) -> &RefCell<WindowState> {
+        self.state.get_or_init(|| MainThreadBound::new(RefCell::default(), mtm)).get(mtm)
+    }
+
     /// Shows the latest colour: now on the main thread, or else via the main
     /// queue. At most one repaint is queued at a time, so a burst of calls
     /// costs one repaint and a stalled main thread doesn't build a backlog.
@@ -91,18 +100,34 @@ impl OverlayWindows {
         }
     }
 
-    /// Hides and closes the windows: now on the main thread, or else via the
-    /// main queue.
-    fn close(self: Arc<Self>) {
-        match MainThreadMarker::new() {
-            Some(mtm) => self.close_now(mtm),
-            None => self.queue_on_main(|this, mtm| this.close_now(mtm)),
+    /// Starts tracking the screens and creates a window on each. Does nothing
+    /// if the overlay was closed first.
+    fn open_now(self: &Arc<Self>, mtm: MainThreadMarker) {
+        let mut state = self.state(mtm).borrow_mut();
+        if state.closed {
+            return;
         }
+        // Weak, so the notification centre doesn't keep the windows alive.
+        let weak = Arc::downgrade(self);
+        let block = RcBlock::new(move |_: NonNull<NSNotification>| on_screens_changed(&weak));
+        let observer = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidChangeScreenParametersNotification),
+                None,
+                // Run on the posting thread, which for AppKit is the main one.
+                None,
+                &block,
+            )
+        };
+        state.screen_observer = Some(observer);
+        drop(state);
+        // With no screens yet, the windows arrive with the first one.
+        self.fit_to_screens(mtm);
     }
 
     fn repaint(&self, mtm: MainThreadMarker) {
         let background = ns_color(*self.color.lock().unwrap());
-        for window in &self.state.get(mtm).borrow().windows {
+        for window in &self.state(mtm).borrow().windows {
             window.setBackgroundColor(Some(&background));
         }
     }
@@ -110,7 +135,7 @@ impl OverlayWindows {
     /// Makes the windows match the current screens: one per screen, each
     /// covering its screen exactly. Existing windows are reused.
     fn fit_to_screens(self: &Arc<Self>, mtm: MainThreadMarker) {
-        let Ok(mut state) = self.state.get(mtm).try_borrow_mut() else {
+        let Ok(mut state) = self.state(mtm).try_borrow_mut() else {
             // AppKit called back in while we were changing the windows; a
             // panic here would abort the process. Try again once we're done.
             Arc::clone(self).queue_on_main(Self::fit_to_screens);
@@ -138,7 +163,7 @@ impl OverlayWindows {
     }
 
     fn close_now(&self, mtm: MainThreadMarker) {
-        let mut state = self.state.get(mtm).borrow_mut();
+        let mut state = self.state(mtm).borrow_mut();
         state.closed = true;
         if let Some(observer) = state.screen_observer.take() {
             let observer: &AnyObject = observer.as_ref();
@@ -182,6 +207,14 @@ impl OverlayWindows {
         window
     }
 
+    /// Runs `f` now on the main thread, or else via the main queue.
+    fn on_main(self: Arc<Self>, f: fn(&Arc<Self>, MainThreadMarker)) {
+        match MainThreadMarker::new() {
+            Some(mtm) => f(&self, mtm),
+            None => self.queue_on_main(f),
+        }
+    }
+
     /// Runs `f` on the main thread. The work takes `self` with it, so this
     /// reference is released there too.
     fn queue_on_main(self: Arc<Self>, f: fn(&Arc<Self>, MainThreadMarker)) {
@@ -195,39 +228,15 @@ impl OverlayWindows {
 
 impl Overlay {
     pub fn new(options: &OverlayOptions) -> Result<Self> {
-        let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
-
         // Deliberately leaves the activation policy alone: whether the process
         // is a background app is the host app's decision, not the overlay's.
         let windows = Arc::new(OverlayWindows {
-            state: MainThreadBound::new(
-                RefCell::new(WindowState { windows: Vec::new(), screen_observer: None, closed: false }),
-                mtm,
-            ),
+            state: OnceLock::new(),
             exclude_from_capture: options.exclude_from_capture,
             color: Mutex::new(options.color),
             repaint_queued: AtomicBool::new(false),
         });
-
-        // Weak, so the notification centre doesn't keep the windows alive.
-        let weak = Arc::downgrade(&windows);
-        let block = RcBlock::new(move |_: NonNull<NSNotification>| on_screens_changed(&weak));
-        let observer = unsafe {
-            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
-                Some(NSApplicationDidChangeScreenParametersNotification),
-                None,
-                // Run on the posting thread, which for AppKit is the main one.
-                None,
-                &block,
-            )
-        };
-        windows.state.get(mtm).borrow_mut().screen_observer = Some(observer);
-
-        windows.fit_to_screens(mtm);
-        if windows.state.get(mtm).borrow().windows.is_empty() {
-            windows.close_now(mtm);
-            return Err(Error::Os("no screens found".into()));
-        }
+        Arc::clone(&windows).on_main(OverlayWindows::open_now);
         Ok(Overlay { windows: ManuallyDrop::new(windows) })
     }
 
@@ -242,7 +251,7 @@ impl Drop for Overlay {
     fn drop(&mut self) {
         // SAFETY: `self.windows` is never used again.
         let windows = unsafe { ManuallyDrop::take(&mut self.windows) };
-        windows.close();
+        windows.on_main(|windows, mtm| windows.close_now(mtm));
     }
 }
 
@@ -251,16 +260,33 @@ fn on_screens_changed(weak: &Weak<OverlayWindows>) {
     // other reference is released on the main thread (see `OverlayWindows`),
     // and we only upgrade there, or pass the reference straight to it.
     let Some(windows) = weak.upgrade() else { return };
+    // AppKit posts this on the main thread, but just in case.
+    windows.on_main(OverlayWindows::fit_to_screens);
+}
+
+/// The latest `set_background_app` request. Like the overlay's colour, work
+/// queued from other threads reads this when it runs, so the last call wins.
+/// Unlike it, each call queues its own update: it's rarely called, so a burst
+/// isn't worth guarding against.
+static WANTED_BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+pub fn set_background_app(background: bool) -> Result<()> {
+    WANTED_BACKGROUND.store(background, Ordering::Release);
     match MainThreadMarker::new() {
-        Some(mtm) => windows.fit_to_screens(mtm),
-        // AppKit posts this on the main thread, but just in case.
-        None => windows.queue_on_main(OverlayWindows::fit_to_screens),
+        Some(mtm) => apply_wanted_background(mtm),
+        None => {
+            DispatchQueue::main().exec_async(|| {
+                // The main queue only ever runs on the main thread. There's no
+                // caller left to report a failure to.
+                let _ = apply_wanted_background(MainThreadMarker::new().unwrap());
+            });
+            Ok(())
+        }
     }
 }
 
-pub fn set_background_app(background: bool) -> Result<()> {
-    let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
-    let policy = if background {
+fn apply_wanted_background(mtm: MainThreadMarker) -> Result<()> {
+    let policy = if WANTED_BACKGROUND.load(Ordering::Acquire) {
         // No Dock icon, menu bar or Cmd-Tab entry, but windows still show.
         NSApplicationActivationPolicy::Accessory
     } else {

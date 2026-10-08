@@ -34,16 +34,17 @@ overlay.set_color(Color::rgba(0.0, 0.0, 0.0, 0.5))?;
 specialfx::run_until(|| false); // macOS: must pump events on the main thread
 ```
 
-Create the overlay on the main thread. The `Overlay` handle is `Send + Sync`,
-so after that you can move it to any thread and update it from there. On macOS
-those updates are queued to the main thread, which must be pumping events:
-either your app's own loop or `run_until`.
+Everything can be called from any thread, and the `Overlay` handle is
+`Send + Sync`. On macOS, where AppKit only works on the main thread, calls made
+elsewhere are queued to the main thread and return straight away. They take
+effect, and the overlay renders, only while the main thread pumps events:
+either your app's own loop or `run_until` called on the main thread.
 
 The library never changes process-wide state like the macOS activation policy
 unless you ask it to, so whether your app has a Dock icon and menu bar is up to
 you. To run without them (the CLI does this), call
-`specialfx::set_background_app(true)` on the main thread before creating the
-overlay. It does nothing on other platforms.
+`specialfx::set_background_app(true)` before creating the overlay. It does
+nothing on other platforms.
 
 ### Hiding other apps
 

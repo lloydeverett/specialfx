@@ -18,18 +18,18 @@
 //!
 //! ## Threading
 //!
-//! [`Overlay`] is `Send + Sync` on every platform: once created, it can be
-//! moved to and updated from any thread.
+//! Everything here can be called from any thread, and [`Overlay`] is
+//! `Send + Sync` on every platform.
 //!
-//! - **macOS**: AppKit requires [`Overlay::new`], [`set_background_app`] and
-//!   [`run_until`] to be called on the main thread. Calls to
-//!   [`Overlay::set_color`] from other threads are queued to the main thread,
-//!   which must be pumping events for them to show: either an existing
-//!   `NSApplication` loop, or [`run_until`]. [`hide_others`] and
-//!   [`show_others`] work the same way. The overlay never changes the
-//!   activation policy on its own, so whether your app has a Dock icon and
-//!   menu bar is up to you: see [`set_background_app`], or set `LSUIElement`
-//!   in your `Info.plist`.
+//! - **macOS**: AppKit only works on the main thread, so calls made elsewhere
+//!   ([`Overlay::new`], [`Overlay::set_color`], dropping an overlay,
+//!   [`set_background_app`], [`hide_others`], [`show_others`]) are queued
+//!   there and return straight away. Nothing shows, and queued calls don't
+//!   take effect, until the main thread pumps events: either an existing
+//!   `NSApplication` loop, or [`run_until`] called on the main thread. The
+//!   overlay never changes the activation policy on its own, so whether your
+//!   app has a Dock icon and menu bar is up to you: see
+//!   [`set_background_app`], or set `LSUIElement` in your `Info.plist`.
 //! - **Windows**: the overlay owns a background thread with its own message
 //!   loop, so it needs no pumping by the caller.
 //!   [`run_until`] just sleeps.
@@ -61,8 +61,6 @@ impl OverlayOptions {
 pub enum Error {
     /// This platform has no backend for the feature.
     Unsupported,
-    /// macOS: [`Overlay::new`] or [`set_background_app`] called off the main thread.
-    NotMainThread,
     /// The OS refused to create or update the overlay.
     Os(String),
 }
@@ -71,7 +69,6 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Unsupported => write!(f, "not supported on this platform"),
-            Error::NotMainThread => write!(f, "overlays must be created on the main thread"),
             Error::Os(msg) => write!(f, "{msg}"),
         }
     }
@@ -83,8 +80,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A live overlay covering every monitor. Dropping it removes the overlay.
 ///
-/// Create it on the main thread; after that it can be used from any thread
-/// (see [Threading](crate#threading)).
+/// It can be created, used and dropped on any thread (see
+/// [Threading](crate#threading)).
 pub struct Overlay {
     inner: platform::Overlay,
     color: Color,
@@ -126,7 +123,9 @@ impl Overlay {
 /// process, so it's the app's call, not the overlay's. A background tool
 /// typically calls `set_background_app(true)` once, before creating an overlay.
 ///
-/// Must be called on the main thread on macOS. Does nothing elsewhere.
+/// Does nothing on other platforms. On macOS, off the main thread, the change
+/// is queued to the main thread (see [Threading](crate#threading)) and any
+/// failure there goes unreported.
 pub fn set_background_app(background: bool) -> Result<()> {
     platform::set_background_app(background)
 }
@@ -221,6 +220,9 @@ pub fn show_others() -> Result<()> {
 
 /// Pumps platform events until `should_stop` returns true. It is polled
 /// roughly every [`POLL_INTERVAL`], so it's a good place to animate colours.
+///
+/// On macOS it only pumps events when called on the main thread. Elsewhere it
+/// just waits, assuming something else pumps the main thread.
 pub fn run_until(should_stop: impl FnMut() -> bool) {
     platform::run_until(should_stop, POLL_INTERVAL)
 }
@@ -237,5 +239,22 @@ mod tests {
         let options = OverlayOptions::new(color);
         assert_eq!(options.color, color);
         assert!(options.exclude_from_capture);
+    }
+
+    // Test threads aren't the main thread, and nothing pumps the main queue
+    // here, so these check only that the calls hand off rather than fail.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn overlay_can_be_used_off_the_main_thread() {
+        let mut overlay = Overlay::new(OverlayOptions::new(Color::rgba(1.0, 0.0, 0.0, 0.2))).unwrap();
+        overlay.set_color(Color::TRANSPARENT).unwrap();
+        assert_eq!(overlay.color(), Color::TRANSPARENT);
+        drop(overlay);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn set_background_app_works_off_the_main_thread() {
+        set_background_app(true).unwrap();
     }
 }
