@@ -20,7 +20,7 @@ required-features = ["cli"]
 clap = { version = "4.6", features = ["derive"], optional = true }
 ctrlc = { version = "3.5", optional = true }
 # Not on crates.io. No default features: only the embedding API, not avarice's CLI or stdlib.
-avarice = { git = "https://github.com/lloydeverett/avarice", rev = "afb1cc7c801eff456864e93f648d4827fddc116a", default-features = false, optional = true }
+avarice = { git = "https://github.com/lloydeverett/avarice", rev = "86bee20ba0b80c177e324a3f27f1e0f1c801dbb5", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
