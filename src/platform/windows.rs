@@ -371,11 +371,10 @@ pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
     }
 }
 
-pub fn show_others() -> Result<()> {
+pub fn stop_hiding_others() -> Result<()> {
     let Some(handle) = HIDER.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return Ok(());
     };
-    // The thread restores what it minimized on its way out.
     let posted = post_to(handle.thread_id, WM_QUIT, 0);
     let _ = handle.thread.join();
     posted
@@ -384,8 +383,6 @@ pub fn show_others() -> Result<()> {
 struct HiderState {
     exempt: Arc<Mutex<Vec<String>>>,
     own_pid: u32,
-    /// Windows we minimized, in order, so `show_others` restores only those.
-    minimized: RefCell<Vec<HWND>>,
 }
 
 thread_local! {
@@ -401,7 +398,6 @@ fn hider_thread(exempt: Arc<Mutex<Vec<String>>>, ready: mpsc::Sender<Result<u32>
             *s.borrow_mut() = Some(HiderState {
                 exempt,
                 own_pid: GetCurrentProcessId(),
-                minimized: RefCell::new(Vec::new()),
             })
         });
 
@@ -445,16 +441,7 @@ fn hider_thread(exempt: Arc<Mutex<Vec<String>>>, ready: mpsc::Sender<Result<u32>
         for hook in hooks {
             UnhookWinEvent(hook);
         }
-        let minimized = HIDER_STATE
-            .with(|s| s.borrow_mut().take())
-            .map(|state| state.minimized.into_inner())
-            .unwrap_or_default();
-        // Reverse order, so the window that was frontmost ends up frontmost.
-        for hwnd in minimized.into_iter().rev() {
-            if IsWindow(hwnd) != 0 && IsIconic(hwnd) != 0 {
-                ShowWindowAsync(hwnd, SW_RESTORE);
-            }
-        }
+        HIDER_STATE.with(|s| s.borrow_mut().take());
     }
 }
 
@@ -488,11 +475,6 @@ unsafe fn maybe_hide(hwnd: HWND) {
         if should_hide(state, hwnd) {
             // Async, so a hung app can't hang us.
             ShowWindowAsync(hwnd, SW_MINIMIZE);
-            let mut minimized = state.minimized.borrow_mut();
-            minimized.retain(|&w| IsWindow(w) != 0);
-            if !minimized.contains(&hwnd) {
-                minimized.push(hwnd);
-            }
         }
     });
 }

@@ -23,12 +23,12 @@
 //!
 //! - **macOS**: AppKit only works on the main thread, so calls made elsewhere
 //!   ([`Overlay::new`], [`Overlay::set_color`], dropping an overlay,
-//!   [`set_background_app`], [`hide_others`], [`show_others`]) are queued
-//!   there and return straight away. Nothing shows, and queued calls don't
-//!   take effect, until the main thread pumps events: either an existing
-//!   `NSApplication` loop, or [`run_until`] called on the main thread. The
-//!   overlay never changes the activation policy on its own, so whether your
-//!   app has a Dock icon and menu bar is up to you: see
+//!   [`set_background_app`], [`hide_others`], [`stop_hiding_others`]) are
+//!   queued there and return straight away. Nothing shows, and queued calls
+//!   don't take effect, until the main thread pumps events: either an
+//!   existing `NSApplication` loop, or [`run_until`] called on the main
+//!   thread. The overlay never changes the activation policy on its own, so
+//!   whether your app has a Dock icon and menu bar is up to you: see
 //!   [`set_background_app`], or set `LSUIElement` in your `Info.plist`.
 //! - **Windows**: the overlay owns a background thread with its own message
 //!   loop, so it needs no pumping by the caller.
@@ -191,33 +191,34 @@ pub mod exemptions {
 }
 
 /// Hides every other app's windows and keeps them hidden, re-hiding any that
-/// reappear or launch, until [`show_others`]. Calling it again while active
-/// just updates the exemptions.
+/// reappear or launch, until [`stop_hiding_others`]. Calling it again while
+/// active just updates the exemptions.
 ///
 /// - **macOS**: hides whole apps, as Cmd-H does (they stay in the Dock and
 ///   Cmd-Tab). Callable from any thread. Off the main thread it returns
 ///   before anything is hidden, and the main thread picks it up later. Either
 ///   way it only takes effect while the main thread pumps events. Whichever
-///   of this and [`show_others`] was called last wins, so calling this then
-///   [`show_others`] from another thread before the main thread gets to them
-///   does nothing.
+///   of this and [`stop_hiding_others`] was called last wins, so calling
+///   this then [`stop_hiding_others`] from another thread before the main
+///   thread gets to them does nothing.
 /// - **Windows**: minimizes top-level windows to the taskbar, from a
 ///   background thread. Windows of elevated processes can't be touched unless
 ///   this process is elevated too.
 ///
-/// If the process dies without calling [`show_others`], the other windows
-/// just stay hidden or minimized, which the user can undo as usual.
+/// Nothing is brought back when hiding stops, whether by
+/// [`stop_hiding_others`] or the process exiting: hidden apps stay in the Dock
+/// or taskbar for the user to bring back as usual.
 pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
     platform::hide_others(options)
 }
 
-/// Stops [`hide_others`] and brings back the windows it hid. Windows the user
-/// had hidden or minimized themselves stay that way. Does nothing if
+/// Stops [`hide_others`] re-hiding other apps' windows. Windows it already hid
+/// stay hidden or minimized until the user brings them back. Does nothing if
 /// [`hide_others`] isn't active. On macOS, off the main thread it returns
-/// before anything is shown again, and the last of the two calls wins, as
-/// with [`hide_others`].
-pub fn show_others() -> Result<()> {
-    platform::show_others()
+/// before hiding has stopped, and the last of the two calls wins, as with
+/// [`hide_others`].
+pub fn stop_hiding_others() -> Result<()> {
+    platform::stop_hiding_others()
 }
 
 /// Pumps platform events until `should_stop` returns true. It is polled

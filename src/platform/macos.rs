@@ -15,11 +15,10 @@
 //!
 //! [`hide_others`] uses `-[NSRunningApplication hide]`, the public equivalent
 //! of Cmd-H, and re-hides apps on workspace notifications and a timer. Like
-//! `set_color`, it and [`show_others`] hand their work to the main dispatch
-//! queue when called off the main thread.
+//! `set_color`, it and [`stop_hiding_others`] hand their work to the main
+//! dispatch queue when called off the main thread.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -339,8 +338,6 @@ const HIDE_SWEEP_INTERVAL: f64 = 0.5;
 struct Hider {
     exempt: Vec<String>,
     builtin_exemptions: bool,
-    /// Apps we hid, so `show_others` restores only those.
-    hidden: HashSet<i32>,
     timer: Retained<NSTimer>,
     observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
@@ -350,9 +347,9 @@ thread_local! {
     static HIDER: RefCell<Option<Hider>> = const { RefCell::new(None) };
 }
 
-/// The latest `hide_others` options, or `None` after `show_others`. Like the
-/// overlay's colour, work queued from other threads reads this when it runs,
-/// so the last call wins whichever thread made it.
+/// The latest `hide_others` options, or `None` after `stop_hiding_others`.
+/// Like the overlay's colour, work queued from other threads reads this when
+/// it runs, so the last call wins whichever thread made it.
 static WANTED_HIDING: Mutex<Option<HideOthersOptions>> = Mutex::new(None);
 /// An `apply_wanted_hiding` is queued on the main thread and hasn't read
 /// `WANTED_HIDING` yet.
@@ -364,7 +361,7 @@ pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
     Ok(())
 }
 
-pub fn show_others() -> Result<()> {
+pub fn stop_hiding_others() -> Result<()> {
     *WANTED_HIDING.lock().unwrap() = None;
     request_hiding_update();
     Ok(())
@@ -393,7 +390,7 @@ fn apply_wanted_hiding(mtm: MainThreadMarker) {
     let wanted = WANTED_HIDING.lock().unwrap().clone();
     match wanted {
         Some(options) => hide_others_now(options, mtm),
-        None => show_others_now(mtm),
+        None => stop_hiding_others_now(mtm),
     }
 }
 
@@ -430,7 +427,6 @@ fn hide_others_now(options: HideOthersOptions, _mtm: MainThreadMarker) {
         let hider = Hider {
             exempt,
             builtin_exemptions: options.builtin_exemptions,
-            hidden: HashSet::new(),
             timer,
             observers,
         };
@@ -439,7 +435,7 @@ fn hide_others_now(options: HideOthersOptions, _mtm: MainThreadMarker) {
     sweep();
 }
 
-fn show_others_now(_mtm: MainThreadMarker) {
+fn stop_hiding_others_now(_mtm: MainThreadMarker) {
     let Some(hider) = HIDER.with(|h| h.borrow_mut().take()) else {
         return;
     };
@@ -448,11 +444,6 @@ fn show_others_now(_mtm: MainThreadMarker) {
     for observer in &hider.observers {
         // Safety: these are the tokens addObserverForName returned.
         unsafe { center.removeObserver(observer.as_ref()) };
-    }
-    for app in NSWorkspace::sharedWorkspace().runningApplications() {
-        if hider.hidden.contains(&app.processIdentifier()) && app.isHidden() && !app.isTerminated() {
-            app.unhide();
-        }
     }
 }
 
@@ -463,12 +454,8 @@ fn sweep() {
         let Ok(mut guard) = h.try_borrow_mut() else { return };
         let Some(hider) = guard.as_mut() else { return };
         let own_pid = NSRunningApplication::currentApplication().processIdentifier();
-        let apps = NSWorkspace::sharedWorkspace().runningApplications();
-        // Forget apps that have quit, so a reused pid isn't unhidden later.
-        hider.hidden.retain(|pid| apps.iter().any(|app| app.processIdentifier() == *pid));
-        for app in apps {
-            let pid = app.processIdentifier();
-            if pid == own_pid
+        for app in NSWorkspace::sharedWorkspace().runningApplications() {
+            if app.processIdentifier() == own_pid
                 || app.isHidden()
                 || app.isTerminated()
                 || app.activationPolicy() == NSApplicationActivationPolicy::Prohibited
@@ -476,9 +463,7 @@ fn sweep() {
             {
                 continue;
             }
-            if app.hide() {
-                hider.hidden.insert(pid);
-            }
+            app.hide();
         }
     });
 }

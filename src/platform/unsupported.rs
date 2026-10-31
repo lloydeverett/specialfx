@@ -31,6 +31,6 @@ pub fn hide_others(_options: &HideOthersOptions) -> Result<()> {
     Err(Error::Unsupported)
 }
 
-pub fn show_others() -> Result<()> {
+pub fn stop_hiding_others() -> Result<()> {
     Ok(())
 }

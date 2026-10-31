@@ -50,10 +50,11 @@ nothing on other platforms.
 
 `specialfx::hide_others(&options)` hides every other app's windows and keeps
 them hidden, re-hiding anything that reappears or launches, until
-`specialfx::show_others()` brings back what it hid. Windows belonging to this
-process are never touched. System UI and task managers are exempt by default
-(`specialfx::exemptions`), and you can exempt more apps, named the way the
-current platform names them (bundle IDs on macOS, executable names on Windows):
+`specialfx::stop_hiding_others()`, which leaves hidden windows as they are for
+the user to bring back. Windows belonging to this process are never touched.
+System UI and task managers are exempt by default (`specialfx::exemptions`),
+and you can exempt more apps, named the way the current platform names them
+(bundle IDs on macOS, executable names on Windows):
 
 ```rust
 let terminal = if cfg!(windows) { "WindowsTerminal.exe" } else { "com.apple.Terminal" };
@@ -73,7 +74,8 @@ Both backends use public APIs only:
   on WinEvent hooks and a 0.5 s timer. It can't touch elevated apps unless
   it's elevated too.
 
-Both are recoverable if the process dies: apps stay in the Dock or taskbar.
+Neither brings anything back when hiding stops or the process exits: apps stay
+in the Dock or taskbar.
 
 Build without the CLI's dependencies with `default-features = false`.
 

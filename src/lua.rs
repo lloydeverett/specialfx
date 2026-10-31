@@ -70,7 +70,7 @@ impl HostModule for SpecialFx {
                 crate::hide_others(&hide_options).map_err(lua_error)
             })?,
         )?;
-        module.set("show_others", lua.create_function(|_, ()| crate::show_others().map_err(lua_error))?)?;
+        module.set("stop_hiding_others", lua.create_function(|_, ()| crate::stop_hiding_others().map_err(lua_error))?)?;
         module.set(
             "set_background_app",
             lua.create_function(|_, background: Value| crate::set_background_app(expect_bool("background", background)?).map_err(lua_error))?,
@@ -349,8 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn show_others_without_hide_others_does_nothing() {
-        eval::<()>("fx.show_others()").unwrap();
+    fn stop_hiding_others_without_hide_others_does_nothing() {
+        eval::<()>("fx.stop_hiding_others()").unwrap();
     }
 
     // As in the library's own tests: off the main thread, macOS queues the

@@ -37,7 +37,7 @@ struct Args {
     allow_capture: bool,
 
     /// Keep every other app's windows hidden (macOS) or minimized (Windows)
-    /// while running, and bring them back on exit.
+    /// while running. They aren't brought back on exit.
     #[arg(long)]
     hide_others: bool,
 
@@ -122,10 +122,6 @@ fn main() -> ExitCode {
         }
         stop.load(Ordering::SeqCst) || deadline.is_some_and(|d| Instant::now() >= d)
     });
-
-    if let Err(e) = specialfx::show_others() {
-        eprintln!("specialfx: couldn't restore other apps: {e}");
-    }
 
     ExitCode::SUCCESS
 }
