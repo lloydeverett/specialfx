@@ -19,6 +19,7 @@
 //! dispatch queue when called off the main thread.
 
 use std::cell::RefCell;
+use std::ffi::OsString;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -356,7 +357,8 @@ static WANTED_HIDING: Mutex<Option<HideOthersOptions>> = Mutex::new(None);
 static HIDING_QUEUED: AtomicBool = AtomicBool::new(false);
 
 pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
-    *WANTED_HIDING.lock().unwrap() = Some(options.clone());
+    let exempt = exempt_names(options, std::env::var_os("__CFBundleIdentifier"));
+    *WANTED_HIDING.lock().unwrap() = Some(HideOthersOptions { exempt, ..options.clone() });
     request_hiding_update();
     Ok(())
 }
@@ -365,6 +367,18 @@ pub fn stop_hiding_others() -> Result<()> {
     *WANTED_HIDING.lock().unwrap() = None;
     request_hiding_update();
     Ok(())
+}
+
+/// The apps `options` exempts by name, with the host terminal if it asks for
+/// it: the app named by `bundle_id`, the value of `__CFBundleIdentifier`.
+fn exempt_names(options: &HideOthersOptions, bundle_id: Option<OsString>) -> Vec<String> {
+    let mut exempt = options.exempt.clone();
+    if options.exempt_host_terminal {
+        if let Some(id) = bundle_id.and_then(|id| id.into_string().ok()).filter(|id| !id.is_empty()) {
+            exempt.push(id);
+        }
+    }
+    exempt
 }
 
 /// Applies `WANTED_HIDING`: now on the main thread, or else via the main
@@ -495,4 +509,35 @@ fn ns_color(color: Color) -> Retained<NSColor> {
         color.b as f64,
         color.a as f64,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    fn options(exempt_host_terminal: bool) -> HideOthersOptions {
+        HideOthersOptions { exempt: vec!["com.example.Kept".into()], exempt_host_terminal, ..Default::default() }
+    }
+
+    fn names(options: &HideOthersOptions, var: Option<&str>) -> Vec<String> {
+        exempt_names(options, var.map(OsString::from))
+    }
+
+    #[test]
+    fn host_terminal_is_exempt_when_asked() {
+        assert_eq!(names(&options(true), Some("com.googlecode.iterm2")), ["com.example.Kept", "com.googlecode.iterm2"]);
+    }
+
+    #[test]
+    fn host_terminal_is_hidden_by_default() {
+        assert_eq!(names(&options(false), Some("com.googlecode.iterm2")), ["com.example.Kept"]);
+    }
+
+    #[test]
+    fn unset_or_empty_bundle_id_exempts_nothing_more() {
+        assert_eq!(names(&options(true), None), ["com.example.Kept"]);
+        assert_eq!(names(&options(true), Some("")), ["com.example.Kept"]);
+    }
 }

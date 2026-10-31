@@ -45,6 +45,11 @@ struct Args {
     /// on macOS, an executable name on Windows. Repeatable.
     #[arg(long, value_name = "APP", requires = "hide_others")]
     exempt: Vec<String>,
+
+    /// With --hide-others, leave alone the terminal this runs in, as best it
+    /// can tell.
+    #[arg(long, requires = "hide_others")]
+    exempt_host_terminal: bool,
 }
 
 /// Colours the CLI accepts by name in place of a hex colour.
@@ -93,7 +98,11 @@ fn main() -> ExitCode {
     };
 
     if args.hide_others {
-        let options = HideOthersOptions { exempt: args.exempt.clone(), ..Default::default() };
+        let options = HideOthersOptions {
+            exempt: args.exempt.clone(),
+            exempt_host_terminal: args.exempt_host_terminal,
+            ..Default::default()
+        };
         if let Err(e) = specialfx::hide_others(&options) {
             eprintln!("specialfx: couldn't hide other apps: {e}");
         }

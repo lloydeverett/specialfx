@@ -18,6 +18,9 @@ use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
@@ -27,6 +30,7 @@ use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWI
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use super::nearest_windowed_ancestor;
 use crate::{exemptions, Color, Error, HideOthersOptions, OverlayOptions, Result};
 
 /// wParam = packed RGBA (see [`pack`]).
@@ -330,17 +334,27 @@ const SHELL_CLASSES: &[&str] = &[
 struct HiderHandle {
     thread_id: u32,
     thread: JoinHandle<()>,
-    /// Lowercase executable names to leave alone.
-    exempt: Arc<Mutex<Vec<String>>>,
+    exempt: Arc<Mutex<Exemptions>>,
+}
+
+/// What `hide_others` leaves alone, besides this process.
+#[derive(Default)]
+struct Exemptions {
+    /// Lowercase executable names.
+    names: Vec<String>,
+    /// The host terminal's process, if asked for and found.
+    host_terminal: Option<u32>,
 }
 
 static HIDER: Mutex<Option<HiderHandle>> = Mutex::new(None);
 
 pub fn hide_others(options: &HideOthersOptions) -> Result<()> {
-    let mut exempt: Vec<String> = options.exempt.iter().map(|s| s.to_lowercase()).collect();
+    let mut names: Vec<String> = options.exempt.iter().map(|s| s.to_lowercase()).collect();
     if options.builtin_exemptions {
-        exempt.extend(exemptions::WINDOWS.iter().map(|s| s.to_lowercase()));
+        names.extend(exemptions::WINDOWS.iter().map(|s| s.to_lowercase()));
     }
+    let host_terminal = if options.exempt_host_terminal { unsafe { host_terminal() } } else { None };
+    let exempt = Exemptions { names, host_terminal };
 
     let mut hider = HIDER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handle) = hider.as_ref() {
@@ -381,7 +395,7 @@ pub fn stop_hiding_others() -> Result<()> {
 }
 
 struct HiderState {
-    exempt: Arc<Mutex<Vec<String>>>,
+    exempt: Arc<Mutex<Exemptions>>,
     own_pid: u32,
 }
 
@@ -389,7 +403,7 @@ thread_local! {
     static HIDER_STATE: RefCell<Option<HiderState>> = const { RefCell::new(None) };
 }
 
-fn hider_thread(exempt: Arc<Mutex<Vec<String>>>, ready: mpsc::Sender<Result<u32>>) {
+fn hider_thread(exempt: Arc<Mutex<Exemptions>>, ready: mpsc::Sender<Result<u32>>) {
     unsafe {
         let mut msg: MSG = std::mem::zeroed();
         PeekMessageW(&mut msg, null_mut(), WM_USER, WM_USER, PM_NOREMOVE);
@@ -512,9 +526,64 @@ unsafe fn should_hide(state: &HiderState, hwnd: HWND) -> bool {
     if SHELL_CLASSES.contains(&class.as_str()) {
         return false;
     }
+    let exempt = || state.exempt.lock().unwrap_or_else(|e| e.into_inner());
+    if exempt().host_terminal == Some(pid) {
+        return false;
+    }
     // If we can't tell what it is, assume it's something we should leave alone.
     let Some(exe) = exe_name(pid) else { return false };
-    !state.exempt.lock().unwrap_or_else(|e| e.into_inner()).contains(&exe)
+    !exempt().names.contains(&exe)
+}
+
+/// The nearest ancestor of this process with a visible top-level window,
+/// below `explorer.exe`. Explorer started the program or its terminal, so
+/// nothing above it is the terminal, and exempting it would leave every File
+/// Explorer window alone.
+unsafe fn host_terminal() -> Option<u32> {
+    let parents = parent_pids();
+    let windowed = windowed_pids();
+    nearest_windowed_ancestor(
+        GetCurrentProcessId(),
+        |pid| {
+            let parent = parents.iter().find(|&&(child, _)| child == pid).map(|&(_, parent)| parent)?;
+            (exe_name(parent).as_deref() != Some("explorer.exe")).then_some(parent)
+        },
+        |pid| windowed.contains(&pid),
+    )
+}
+
+/// Every running process as (pid, parent pid).
+unsafe fn parent_pids() -> Vec<(u32, u32)> {
+    let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    let mut pids = Vec::new();
+    let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut ok = Process32FirstW(snapshot, &mut entry);
+    while ok != 0 {
+        pids.push((entry.th32ProcessID, entry.th32ParentProcessID));
+        ok = Process32NextW(snapshot, &mut entry);
+    }
+    CloseHandle(snapshot);
+    pids
+}
+
+/// The processes that own a visible top-level window.
+unsafe fn windowed_pids() -> Vec<u32> {
+    unsafe extern "system" fn add(hwnd: HWND, pids: LPARAM) -> BOOL {
+        let pids = &mut *(pids as *mut Vec<u32>);
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 && IsWindowVisible(hwnd) != 0 && !pids.contains(&pid) {
+            pids.push(pid);
+        }
+        TRUE
+    }
+    let mut pids = Vec::new();
+    EnumWindows(Some(add), &mut pids as *mut Vec<u32> as LPARAM);
+    pids
 }
 
 /// Lowercase executable file name of `pid`.

@@ -55,9 +55,12 @@ impl HostModule for SpecialFx {
             lua.create_function(|_, options: Option<Table>| {
                 let mut hide_options = HideOthersOptions::default();
                 if let Some(options) = options {
-                    expect_keys(&options, &["builtin_exemptions", "exempt"])?;
+                    expect_keys(&options, &["builtin_exemptions", "exempt", "exempt_host_terminal"])?;
                     if let Some(builtin) = optional_bool(&options, "builtin_exemptions")? {
                         hide_options.builtin_exemptions = builtin;
+                    }
+                    if let Some(host_terminal) = optional_bool(&options, "exempt_host_terminal")? {
+                        hide_options.exempt_host_terminal = host_terminal;
                     }
                     match options.get::<Value>("exempt")? {
                         Value::Nil => {}
@@ -329,6 +332,7 @@ mod tests {
         assert!(error("fx.hide_others({ builtin_exemptions = 'yes' })").contains("builtin_exemptions must be"));
         assert!(error("fx.overlay('#000', { exclude_from_capture = 'no' })").contains("exclude_from_capture must be"));
         assert!(error("fx.hide_others({ exempt = { 'a', 5 } })").contains("exempt[2] must be a string"));
+        assert!(error("fx.hide_others({ exempt_host_terminal = 1 })").contains("exempt_host_terminal must be"));
     }
 
     #[test]
@@ -346,6 +350,14 @@ mod tests {
     #[test]
     fn overlay_needs_a_color() {
         assert!(error("fx.overlay()").contains("color must be"));
+    }
+
+    // Off the main thread, macOS queues the hiding rather than failing, and
+    // nothing pumps the main queue here, so nothing is actually hidden.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hide_others_accepts_exempt_host_terminal() {
+        eval::<()>("fx.hide_others({ exempt_host_terminal = true }) fx.stop_hiding_others()").unwrap();
     }
 
     #[test]

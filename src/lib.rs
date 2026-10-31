@@ -146,11 +146,25 @@ pub struct HideOthersOptions {
     ///   executable name for apps without one.
     /// - **Windows**: an executable file name (`WindowsTerminal.exe`).
     pub exempt: Vec<String>,
+    /// Leave alone the terminal this process runs in, for command-line
+    /// programs. Off by default, since a GUI app has no terminal to keep.
+    /// It's a best guess, worked out when [`hide_others`] is called:
+    ///
+    /// - **macOS**: the app named by `__CFBundleIdentifier`, which macOS sets
+    ///   for apps it launches and their child processes inherit. It survives
+    ///   multiplexers like tmux and zellij, but names the terminal the session
+    ///   was started in, which may not be the one attached to it now.
+    /// - **Windows**: the nearest ancestor process that has a top-level
+    ///   window, such as `WindowsTerminal.exe`, stopping at `explorer.exe`.
+    ///   It finds nothing when the terminal didn't start the shell: in the
+    ///   old console host, whose window belongs to `conhost.exe`, or when
+    ///   Windows hands a console started from Explorer to Windows Terminal.
+    pub exempt_host_terminal: bool,
 }
 
 impl Default for HideOthersOptions {
     fn default() -> Self {
-        HideOthersOptions { builtin_exemptions: true, exempt: Vec::new() }
+        HideOthersOptions { builtin_exemptions: true, exempt: Vec::new(), exempt_host_terminal: false }
     }
 }
 

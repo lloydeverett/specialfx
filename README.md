@@ -64,6 +64,14 @@ specialfx::hide_others(&specialfx::HideOthersOptions {
 })?;
 ```
 
+A command-line program can set `exempt_host_terminal` to leave alone the
+terminal it runs in instead of naming it. It's a best guess: on macOS, the app
+named by `__CFBundleIdentifier`, which survives tmux and zellij but names the
+terminal the session was started in; on Windows, the nearest ancestor process
+with a window below `explorer.exe`, which finds nothing when the terminal didn't
+start the shell (the old console host, or a console Windows hands off to
+Windows Terminal). Name the terminal in `exempt` when the guess falls short.
+
 Both backends use public APIs only:
 
 - **macOS** hides whole apps with `NSRunningApplication.hide()`, as Cmd-H does,
@@ -97,7 +105,7 @@ and scripts can use the whole library:
 local fx = require("specialfx")
 local overlay = fx.overlay(fx.color.rgba(1, 0.55, 0.1, 0.3))
 overlay:set_color("#00000080")  -- hex strings work anywhere a colour does
-fx.hide_others({ exempt = { "com.apple.Terminal" } })
+fx.hide_others({ exempt_host_terminal = true })
 ```
 
 Colours are `{ r =, g =, b =, a = }` tables, and `fx.color` has the same
