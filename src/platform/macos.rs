@@ -14,23 +14,27 @@
 //! changed only when the caller asks, via [`set_background_app`].
 //!
 //! [`hide_others`] uses `-[NSRunningApplication hide]`, the public equivalent
-//! of Cmd-H, and re-hides apps on workspace notifications and a timer. Like
-//! `set_color`, it and [`stop_hiding_others`] hand their work to the main
-//! dispatch queue when called off the main thread.
+//! of Cmd-H, and re-hides apps on workspace notifications and a timer. Apps
+//! that ignore it (Chrome does while one of its installed web apps runs) are
+//! also hidden through the Accessibility API, if this process is trusted for
+//! it. Like `set_color`, it and [`stop_hiding_others`] hand their work to the
+//! main dispatch queue when called off the main thread.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification,
     NSBackingStoreType, NSColor, NSEventMask, NSRunningApplication, NSScreen, NSWindow,
@@ -38,6 +42,7 @@ use objc2_app_kit::{
     NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidLaunchApplicationNotification,
     NSWorkspaceDidUnhideApplicationNotification,
 };
+use objc2_core_foundation::{CFBoolean, CFString};
 use objc2_foundation::{
     NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSRect, NSTimer,
 };
@@ -336,9 +341,31 @@ pub fn run_until(mut should_stop: impl FnMut() -> bool, interval: Duration) {
 /// ignored a hide request because it was still launching.
 const HIDE_SWEEP_INTERVAL: f64 = 0.5;
 
+/// How long an app may stay visible after being asked to hide before it's
+/// taken to have ignored the request and is hidden through Accessibility too.
+/// Hiding is asynchronous, and sweeps can come milliseconds apart. A little
+/// under `HIDE_SWEEP_INTERVAL`, so timer jitter can't put it off a whole
+/// interval.
+const AX_HIDE_DELAY: Duration = Duration::from_millis(400);
+
+/// How long an Accessibility request waits on an app before giving up, so a
+/// hung app can't stall the main thread for the system default of 6 s. Each
+/// hung app can still cost this much once per `AX_HUNG_BACKOFF`, and several
+/// that hang together add up within one sweep.
+const AX_MESSAGING_TIMEOUT: f32 = 0.25;
+
+/// How long to leave an app alone after its Accessibility request timed out,
+/// so a hung app doesn't cost `AX_MESSAGING_TIMEOUT` on every sweep.
+const AX_HUNG_BACKOFF: Duration = Duration::from_secs(5);
+
 struct Hider {
     exempt: Vec<String>,
     builtin_exemptions: bool,
+    /// For each app still visible after being asked to hide, by pid, when to
+    /// hide it through Accessibility: `AX_HIDE_DELAY` after it was first
+    /// asked, or later after a timeout. Only apps the last sweep found
+    /// visible are kept, so one that hides and reappears starts afresh.
+    ax_hide_due: HashMap<i32, Instant>,
     timer: Retained<NSTimer>,
     observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
@@ -441,6 +468,7 @@ fn hide_others_now(options: HideOthersOptions, _mtm: MainThreadMarker) {
         let hider = Hider {
             exempt,
             builtin_exemptions: options.builtin_exemptions,
+            ax_hide_due: HashMap::new(),
             timer,
             observers,
         };
@@ -461,15 +489,22 @@ fn stop_hiding_others_now(_mtm: MainThreadMarker) {
     }
 }
 
-/// Hides every visible app that isn't us or exempt.
+/// Hides every visible app that isn't us or exempt. Each is asked as Cmd-H
+/// does, every sweep, and also through Accessibility once it has ignored that
+/// for `AX_HIDE_DELAY`.
 fn sweep() {
     HIDER.with(|h| {
         // Skip rather than panic if a hide somehow re-entered us.
         let Ok(mut guard) = h.try_borrow_mut() else { return };
         let Some(hider) = guard.as_mut() else { return };
         let own_pid = NSRunningApplication::currentApplication().processIdentifier();
+        let now = Instant::now();
+        // Safety: takes no arguments and only reads this process's trust.
+        let ax_trusted = unsafe { AXIsProcessTrusted() };
+        let mut still_visible = HashMap::new();
         for app in NSWorkspace::sharedWorkspace().runningApplications() {
-            if app.processIdentifier() == own_pid
+            let pid = app.processIdentifier();
+            if pid == own_pid
                 || app.isHidden()
                 || app.isTerminated()
                 || app.activationPolicy() == NSApplicationActivationPolicy::Prohibited
@@ -478,8 +513,34 @@ fn sweep() {
                 continue;
             }
             app.hide();
+            let mut due = hider.ax_hide_due.get(&pid).copied().unwrap_or(now + AX_HIDE_DELAY);
+            if ax_trusted && now >= due && ax_hide(pid) == AXError::CannotComplete {
+                due = now + AX_HUNG_BACKOFF;
+            }
+            still_visible.insert(pid, due);
         }
+        hider.ax_hide_due = still_visible;
     });
+}
+
+/// Hides the app with `pid` by setting its `AXHidden` attribute, as System
+/// Events does, for apps that ignore `-[NSRunningApplication hide]`. Needs
+/// this process to be trusted for Accessibility. `CannotComplete` means the
+/// app didn't answer within `AX_MESSAGING_TIMEOUT`.
+fn ax_hide(pid: i32) -> AXError {
+    // Safety: `new_application` takes any pid, and an element for one that
+    // has quit just fails requests. `set_messaging_timeout` gets that valid
+    // element and a positive timeout. The attribute and value are a CFString
+    // and a CFBoolean, the types `AXHidden` takes, and outlive the calls.
+    unsafe {
+        let app = AXUIElement::new_application(pid);
+        // It fails only for a bad element or timeout, and then the request
+        // below fails too, which the caller sees.
+        let _ = app.set_messaging_timeout(AX_MESSAGING_TIMEOUT);
+        // `kAXHiddenAttribute`. The bindings leave out the attribute names,
+        // which the headers define only as macros.
+        app.set_attribute_value(&CFString::from_static_str("AXHidden"), CFBoolean::new(true))
+    }
 }
 
 fn is_exempt(hider: &Hider, app: &NSRunningApplication) -> bool {

@@ -39,6 +39,23 @@ windows-sys = { version = "0.61", features = [
 block2 = "0.6"
 dispatch2 = "0.3"
 objc2 = "0.6"
+# Accessibility, to hide apps that ignore -[NSRunningApplication hide]. No
+# default features: they bind the whole framework, and only AXUIElement is used
+# (`libc` is for its pid_t argument).
+objc2-application-services = { version = "0.3", default-features = false, features = [
+    "AXError",
+    "AXUIElement",
+    "HIServices",
+    "libc",
+    "std",
+] }
+# The CFString and CFBoolean (in CFNumber) that Accessibility takes. No default
+# features, for the same reason.
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "CFNumber",
+    "CFString",
+    "std",
+] }
 objc2-foundation = { version = "0.3", features = [
     "block2",
     "NSArray",
